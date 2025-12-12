@@ -1,37 +1,9 @@
 # db_helpers.py
-# Common database operations
+# Database helper functions using Streamlit-native connection API
 
 import pandas as pd
-from sqlalchemy import text
 import json
-from db_config import get_db_engine
-
-def execute_query(query, params=None):
-    """Execute a query and return results as DataFrame"""
-    engine = get_db_engine()
-    with engine.connect() as conn:
-        if params:
-            result = conn.execute(text(query), params)
-        else:
-            result = conn.execute(text(query))
-        conn.commit()
-        return result
-
-def fetch_dataframe(query, params=None):
-    """Fetch query results as pandas DataFrame"""
-    engine = get_db_engine()
-    if params:
-        return pd.read_sql(text(query), engine, params=params)
-    else:
-        return pd.read_sql(text(query), engine)
-
-def insert_and_get_id(query, params):
-    """Insert record and return the inserted ID"""
-    engine = get_db_engine()
-    with engine.connect() as conn:
-        result = conn.execute(text(query), params)
-        conn.commit()
-        return result.lastrowid
+from db_config import query_db, execute_db, insert_and_get_id
 
 # ============================================
 # TEAM OPERATIONS
@@ -40,12 +12,16 @@ def insert_and_get_id(query, params):
 def get_teams():
     """Get all teams"""
     query = "SELECT * FROM teams ORDER BY created_at DESC"
-    return fetch_dataframe(query)
+    return query_db(query, ttl=300)  # Cache for 5 minutes
 
 def get_current_team_id():
-    """Get the most recent team ID (for single-team tracking)"""
+    """Get the most recent team ID"""
     df = get_teams()
-    return df.iloc[0]['team_id'] if not df.empty else None
+    if not df.empty:
+        return int(df.iloc[0]['team_id'])
+    else:
+        # Create default team if none exists
+        return create_team("My Team", "2024-25")
 
 def create_team(team_name, season):
     """Create a new team"""
@@ -66,7 +42,7 @@ def get_players(team_id):
         WHERE team_id = :team_id 
         ORDER BY jersey_number
     """
-    return fetch_dataframe(query, {'team_id': team_id})
+    return query_db(query, params={'team_id': team_id}, ttl=300)
 
 def add_player(team_id, name, number, position=None):
     """Add a new player"""
@@ -88,7 +64,7 @@ def update_player(player_id, name, number, position):
         SET player_name = :name, jersey_number = :number, position = :position
         WHERE player_id = :player_id
     """
-    execute_query(query, {
+    execute_db(query, {
         'player_id': player_id,
         'name': name,
         'number': number,
@@ -107,7 +83,7 @@ def create_game(team_id, game_date, opponent, location):
     """
     return insert_and_get_id(query, {
         'team_id': team_id,
-        'game_date': game_date,
+        'game_date': str(game_date),
         'opponent': opponent,
         'location': location
     })
@@ -115,7 +91,7 @@ def create_game(team_id, game_date, opponent, location):
 def get_game(game_id):
     """Get game details"""
     query = "SELECT * FROM games WHERE game_id = :game_id"
-    df = fetch_dataframe(query, {'game_id': game_id})
+    df = query_db(query, params={'game_id': game_id}, ttl=60)
     return df.iloc[0].to_dict() if not df.empty else None
 
 def update_game_score(game_id, score_us, score_them):
@@ -125,7 +101,7 @@ def update_game_score(game_id, score_us, score_them):
         SET final_score_us = :score_us, final_score_them = :score_them
         WHERE game_id = :game_id
     """
-    execute_query(query, {
+    execute_db(query, {
         'game_id': game_id,
         'score_us': score_us,
         'score_them': score_them
@@ -134,18 +110,23 @@ def update_game_score(game_id, score_us, score_them):
 def complete_game(game_id):
     """Mark game as completed"""
     query = "UPDATE games SET game_completed = TRUE WHERE game_id = :game_id"
-    execute_query(query, {'game_id': game_id})
+    execute_db(query, {'game_id': game_id})
 
 def get_games(team_id, completed_only=False):
     """Get all games for a team"""
-    query = """
-        SELECT * FROM games 
-        WHERE team_id = :team_id
-    """
     if completed_only:
-        query += " AND game_completed = TRUE"
-    query += " ORDER BY game_date DESC"
-    return fetch_dataframe(query, {'team_id': team_id})
+        query = """
+            SELECT * FROM games 
+            WHERE team_id = :team_id AND game_completed = TRUE
+            ORDER BY game_date DESC
+        """
+    else:
+        query = """
+            SELECT * FROM games 
+            WHERE team_id = :team_id
+            ORDER BY game_date DESC
+        """
+    return query_db(query, params={'team_id': team_id}, ttl=60)
 
 def get_active_game(team_id):
     """Get the current active (incomplete) game"""
@@ -155,11 +136,11 @@ def get_active_game(team_id):
         ORDER BY created_at DESC
         LIMIT 1
     """
-    df = fetch_dataframe(query, {'team_id': team_id})
+    df = query_db(query, params={'team_id': team_id}, ttl=0)  # No cache for active game
     return df.iloc[0].to_dict() if not df.empty else None
 
 # ============================================
-# POSSESSION OPERATIONS (Simple Model)
+# POSSESSION OPERATIONS
 # ============================================
 
 def add_possession(game_id, quarter, time_remaining, outcome, failure_type, players_on_court):
@@ -169,7 +150,7 @@ def add_possession(game_id, quarter, time_remaining, outcome, failure_type, play
         (game_id, quarter, time_remaining, outcome, failure_type, players_on_court)
         VALUES (:game_id, :quarter, :time_remaining, :outcome, :failure_type, :players)
     """
-    execute_query(query, {
+    execute_db(query, {
         'game_id': game_id,
         'quarter': quarter,
         'time_remaining': time_remaining,
@@ -181,7 +162,7 @@ def add_possession(game_id, quarter, time_remaining, outcome, failure_type, play
 def get_possessions(game_id):
     """Get all possessions for a game"""
     query = "SELECT * FROM possessions WHERE game_id = :game_id ORDER BY possession_id"
-    return fetch_dataframe(query, {'game_id': game_id})
+    return query_db(query, params={'game_id': game_id}, ttl=60)
 
 # ============================================
 # PLAYER STATS OPERATIONS
@@ -206,7 +187,7 @@ def upsert_player_stats(game_id, player_id, stats):
             blocks = VALUES(blocks),
             fouls = VALUES(fouls)
     """
-    execute_query(query, {
+    execute_db(query, {
         'game_id': game_id,
         'player_id': player_id,
         'minutes': stats.get('minutes', 0),
@@ -226,134 +207,3 @@ def get_player_stats(game_id):
         SELECT pgs.*, p.player_name, p.jersey_number
         FROM player_game_stats pgs
         JOIN players p ON pgs.player_id = p.player_id
-        WHERE pgs.game_id = :game_id
-    """
-    return fetch_dataframe(query, {'game_id': game_id})
-
-# ============================================
-# DETAILED POSSESSION OPERATIONS (Complex Model)
-# ============================================
-
-def add_detailed_possession(possession_data):
-    """Add detailed possession record"""
-    query = """
-        INSERT INTO detailed_possessions 
-        (game_id, quarter, time_elapsed_seconds, lineup, ball_advancement,
-         shot_quality, shooter_id, shot_type, shot_result, outcome, 
-         points_scored, momentum_state)
-        VALUES (:game_id, :quarter, :time_elapsed, :lineup, :ball_adv,
-                :shot_quality, :shooter_id, :shot_type, :shot_result, :outcome,
-                :points, :momentum)
-    """
-    execute_query(query, {
-        'game_id': possession_data['game_id'],
-        'quarter': possession_data['quarter'],
-        'time_elapsed': possession_data['time_elapsed'],
-        'lineup': json.dumps(possession_data['lineup']),
-        'ball_adv': possession_data.get('ball_advancement'),
-        'shot_quality': possession_data.get('shot_quality'),
-        'shooter_id': possession_data.get('shooter_id'),
-        'shot_type': possession_data.get('shot_type'),
-        'shot_result': possession_data.get('shot_result'),
-        'outcome': possession_data.get('outcome'),
-        'points': possession_data.get('points_scored', 0),
-        'momentum': possession_data.get('momentum_state', 0)
-    })
-
-def get_detailed_possessions(game_id):
-    """Get detailed possessions for a game"""
-    query = "SELECT * FROM detailed_possessions WHERE game_id = :game_id ORDER BY time_elapsed_seconds"
-    return fetch_dataframe(query, {'game_id': game_id})
-
-# ============================================
-# SHOT OPERATIONS
-# ============================================
-
-def add_shot(shot_data):
-    """Add a shot record"""
-    query = """
-        INSERT INTO shots 
-        (game_id, player_id, quarter, time_elapsed_seconds, shot_type, shot_quality, made)
-        VALUES (:game_id, :player_id, :quarter, :time_elapsed, :shot_type, :quality, :made)
-    """
-    execute_query(query, {
-        'game_id': shot_data['game_id'],
-        'player_id': shot_data['player_id'],
-        'quarter': shot_data['quarter'],
-        'time_elapsed': shot_data['time_elapsed'],
-        'shot_type': shot_data['shot_type'],
-        'quality': shot_data['quality'],
-        'made': shot_data['made']
-    })
-
-def get_shots(game_id=None, player_id=None):
-    """Get shots, optionally filtered by game or player"""
-    query = "SELECT s.*, p.player_name, p.jersey_number FROM shots s JOIN players p ON s.player_id = p.player_id WHERE 1=1"
-    params = {}
-    
-    if game_id:
-        query += " AND s.game_id = :game_id"
-        params['game_id'] = game_id
-    
-    if player_id:
-        query += " AND s.player_id = :player_id"
-        params['player_id'] = player_id
-    
-    query += " ORDER BY s.game_id, s.time_elapsed_seconds"
-    return fetch_dataframe(query, params if params else None)
-
-# ============================================
-# ANALYTICS QUERIES
-# ============================================
-
-def get_constraint_analysis(game_id):
-    """Analyze where possessions are breaking down"""
-    query = """
-        SELECT failure_type, COUNT(*) as count
-        FROM possessions
-        WHERE game_id = :game_id AND outcome = 'FAILED'
-        GROUP BY failure_type
-        ORDER BY count DESC
-    """
-    return fetch_dataframe(query, {'game_id': game_id})
-
-def get_lineup_performance(game_id=None):
-    """Get lineup performance statistics"""
-    query = """
-        SELECT 
-            lineup,
-            COUNT(*) as possessions,
-            SUM(CASE WHEN outcome = 'SCORE' THEN 1 ELSE 0 END) as scores,
-            SUM(points_scored) as total_points
-        FROM detailed_possessions
-        WHERE 1=1
-    """
-    params = {}
-    if game_id:
-        query += " AND game_id = :game_id"
-        params['game_id'] = game_id
-    
-    query += " GROUP BY lineup ORDER BY total_points DESC"
-    return fetch_dataframe(query, params if params else None)
-
-def get_player_shooting_stats(game_id=None):
-    """Get shooting statistics by player"""
-    query = """
-        SELECT 
-            p.player_name,
-            p.jersey_number,
-            s.shot_type,
-            s.shot_quality,
-            COUNT(*) as attempts,
-            SUM(CASE WHEN s.made THEN 1 ELSE 0 END) as makes,
-            ROUND(SUM(CASE WHEN s.made THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as fg_pct
-        FROM shots s
-        JOIN players p ON s.player_id = p.player_id
-    """
-    params = {}
-    if game_id:
-        query += " WHERE s.game_id = :game_id"
-        params['game_id'] = game_id
-    
-    query += " GROUP BY p.player_id, s.shot_type, s.shot_quality ORDER BY p.player_name, s.shot_type"
-    return fetch_dataframe(query, params if params else None)
