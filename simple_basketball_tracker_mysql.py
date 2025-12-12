@@ -1,13 +1,14 @@
 # simple_basketball_tracker_mysql.py
+# Basketball tracker with Streamlit-native MySQL backend
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
-from db_config import test_connection, get_db_engine
+from db_config import test_connection, get_connection_info, show_connection_status
 from db_helpers import *
 
-st.set_page_config(page_title="Basketball QuickTrack", layout="wide")
+st.set_page_config(page_title="Basketball QuickTrack (MySQL)", layout="wide")
 
 # Test database connection on startup
 if 'db_connected' not in st.session_state:
@@ -21,8 +22,8 @@ if not st.session_state.db_connected:
 if 'team_id' not in st.session_state:
     team_id = get_current_team_id()
     if team_id is None:
-        st.error("No team found. Please create a team first.")
-        st.stop()
+        st.error("No team found. Creating default team...")
+        team_id = create_team("My Team", "2024-25")
     st.session_state.team_id = team_id
 
 team_id = st.session_state.team_id
@@ -30,11 +31,15 @@ team_id = st.session_state.team_id
 # Sidebar
 page = st.sidebar.radio("Navigate", ["🏀 Game Tracker", "👥 Manage Players", "📊 Analytics", "💾 Data Export"])
 
+# Optional: Show connection status in sidebar
+if st.sidebar.checkbox("Show DB Status", value=False):
+    show_connection_status()
+
 # ============================================
 # PAGE 1: GAME TRACKER
 # ============================================
 if page == "🏀 Game Tracker":
-    st.title("🏀 QuickTrack: Simple Basketball Tracking (MySQL)")
+    st.title("🏀 QuickTrack: Simple Basketball Tracking")
     
     # Check for active game
     active_game = get_active_game(team_id)
@@ -83,7 +88,8 @@ if page == "🏀 Game Tracker":
         
         players_df = get_players(team_id)
         if players_df.empty:
-            st.warning("No players found. Please add players first.")
+            st.warning("⚠️ No players found. Please add players first in the 'Manage Players' section.")
+            st.info("👉 Go to 'Manage Players' to add your team roster before starting to track the game.")
         else:
             lineup_cols = st.columns(5)
             selected_players = []
@@ -95,7 +101,9 @@ if page == "🏀 Game Tracker":
                     selected = st.selectbox(f"Player {i+1}", player_options, key=f"lineup_{i}")
                     
                     if selected != "None":
-                        player_id = players_df[players_df.apply(lambda r: f"{r['jersey_number']} - {r['player_name']}" == selected, axis=1)]['player_id'].iloc[0]
+                        player_id = players_df[players_df.apply(
+                            lambda r: f"{r['jersey_number']} - {r['player_name']}" == selected, axis=1
+                        )]['player_id'].iloc[0]
                         selected_players.append(int(player_id))
             
             st.divider()
@@ -118,7 +126,8 @@ if page == "🏀 Game Tracker":
                     st.rerun()
             
             with col3:
-                failure_type = st.selectbox("If Failed, Why?", ["Turnover", "Ball_Advancement", "Shot_Selection", "Bad_Process"])
+                failure_type = st.selectbox("If Failed, Why?", 
+                    ["Turnover", "Ball_Advancement", "Shot_Selection", "Bad_Process"])
                 if st.button("❌ FAILED\n(Bad Possession)", use_container_width=True):
                     add_possession(game_id, quarter, None, "FAILED", failure_type, selected_players)
                     st.error(f"❌ Failed possession logged: {failure_type}")
@@ -130,9 +139,12 @@ if page == "🏀 Game Tracker":
             with st.expander("📝 Quick Player Stats Entry"):
                 st.write("Update player stats as the game progresses")
                 
-                player_options_full = [f"{row['jersey_number']} - {row['player_name']}" for _, row in players_df.iterrows()]
+                player_options_full = [f"{row['jersey_number']} - {row['player_name']}" 
+                                      for _, row in players_df.iterrows()]
                 stat_player = st.selectbox("Select Player", player_options_full)
-                selected_player_id = players_df[players_df.apply(lambda r: f"{r['jersey_number']} - {r['player_name']}" == stat_player, axis=1)]['player_id'].iloc[0]
+                selected_player_id = players_df[players_df.apply(
+                    lambda r: f"{r['jersey_number']} - {r['player_name']}" == stat_player, axis=1
+                )]['player_id'].iloc[0]
                 
                 # Get existing stats if any
                 existing_stats = get_player_stats(game_id)
@@ -171,7 +183,7 @@ if page == "🏀 Game Tracker":
                         'minutes': minutes,
                         'points': points,
                         'assists': assists,
-                        'rebounds_offensive': rebounds // 2,  # Split evenly for simplicity
+                        'rebounds_offensive': rebounds // 2,
                         'rebounds_defensive': rebounds - (rebounds // 2),
                         'turnovers': turnovers,
                         'steals': steals,
@@ -196,29 +208,35 @@ if page == "🏀 Game Tracker":
                 
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Possessions", total_poss)
-                col2.metric("Possession Efficiency", f"{(good_poss/total_poss*100):.1f}%", delta="Target: 60%")
-                col3.metric("Waste Rate", f"{(failed_poss/total_poss*100):.1f}%", delta="Target: <25%")
-                col4.metric("Score Differential", our_score - their_score)
+                col2.metric("Possession Efficiency", f"{(good_poss/total_poss*100):.1f}%", 
+                          delta=f"{(good_poss/total_poss*100)-60:.1f}% vs target")
+                col3.metric("Waste Rate", f"{(failed_poss/total_poss*100):.1f}%",
+                          delta=f"{25-(failed_poss/total_poss*100):.1f}% under target")
+                col4.metric("Score Differential", our_score - their_score,
+                          delta="Winning" if our_score > their_score else "Losing")
                 
                 # Constraint Analysis
-                failed_df = possessions_df[possessions_df['outcome'] == 'FAILED']
-                if not failed_df.empty and failed_df['failure_type'].notna().any():
+                constraint_df = get_constraint_analysis(game_id)
+                if not constraint_df.empty:
                     st.subheader("🎯 Your Constraint (Where Possessions Break Down)")
-                    constraint_df = get_constraint_analysis(game_id)
                     
-                    if not constraint_df.empty:
-                        fig = px.bar(constraint_df, x='failure_type', y='count',
-                                   labels={'failure_type': 'Failure Type', 'count': 'Count'},
-                                   title="Possession Breakdowns")
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        st.info(f"**CONSTRAINT: {constraint_df.iloc[0]['failure_type']}** - This is where to focus practice!")
+                    fig = px.bar(constraint_df, x='failure_type', y='count',
+                               labels={'failure_type': 'Failure Type', 'count': 'Count'},
+                               title="Possession Breakdowns",
+                               color='count',
+                               color_continuous_scale='Reds')
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.info(f"**🎯 CONSTRAINT: {constraint_df.iloc[0]['failure_type']}** - Focus practice here!")
+            else:
+                st.info("Start tracking possessions to see live analytics")
         
         # End Game
         st.divider()
         if st.button("🏁 End Game & Save", type="primary"):
             complete_game(game_id)
-            st.success("Game completed and saved!")
+            st.success("✅ Game completed and saved!")
+            st.balloons()
             st.rerun()
 
 # ============================================
@@ -233,14 +251,14 @@ elif page == "👥 Manage Players":
     if not players_df.empty:
         display_df = players_df[['jersey_number', 'player_name', 'position']].copy()
         display_df.columns = ['Number', 'Name', 'Position']
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
     else:
-        st.info("No players added yet")
+        st.info("No players added yet. Add your first player below!")
     
     st.divider()
     
     # Add new player
-    with st.expander("➕ Add New Player"):
+    with st.expander("➕ Add New Player", expanded=players_df.empty):
         col1, col2, col3 = st.columns(3)
         with col1:
             new_name = st.text_input("Player Name")
@@ -249,13 +267,13 @@ elif page == "👥 Manage Players":
         with col3:
             new_position = st.selectbox("Position", ["", "PG", "SG", "SF", "PF", "C"])
         
-        if st.button("Add Player"):
+        if st.button("Add Player", type="primary"):
             if new_name and new_number:
                 add_player(team_id, new_name, new_number, new_position if new_position else None)
-                st.success(f"Added {new_name} (#{new_number})")
+                st.success(f"✅ Added {new_name} (#{new_number})")
                 st.rerun()
             else:
-                st.error("Please enter name and number")
+                st.error("Please enter both name and number")
 
 # ============================================
 # PAGE 3: ANALYTICS
@@ -266,7 +284,7 @@ elif page == "📊 Analytics":
     games_df = get_games(team_id, completed_only=True)
     
     if games_df.empty:
-        st.info("No completed games yet. Finish tracking a game to see analytics!")
+        st.info("📊 No completed games yet. Finish tracking a game to see analytics!")
     else:
         # Game selector
         game_options = ["All Games"] + [f"{row['game_date']} vs {row['opponent']}" 
@@ -343,7 +361,7 @@ elif page == "📊 Analytics":
         if not stats_df.empty:
             st.subheader("Player Performance")
             
-            # Calculate totals and per-minute stats
+            # Calculate metrics
             stats_df['total_rebounds'] = stats_df['rebounds_offensive'] + stats_df['rebounds_defensive']
             stats_df['net_impact'] = (
                 stats_df['points'] + 
@@ -360,13 +378,15 @@ elif page == "📊 Analytics":
                           'turnovers', 'steals', 'net_impact', 'net_impact_per_10']
             display_df = stats_df[display_cols].sort_values('net_impact', ascending=False)
             display_df.columns = ['Player', 'Min', 'Pts', 'Ast', 'Reb', 'TO', 'Stl', 'Impact', 'Impact/10']
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
             
             # Chart
-            fig = px.bar(stats_df.sort_values('net_impact_per_10', ascending=False),
+            fig = px.bar(stats_df.sort_values('net_impact_per_10', ascending=False).head(10),
                         x='player_name', y='net_impact_per_10',
-                        title='Net Impact Rating per 10 Minutes',
-                        labels={'net_impact_per_10': 'Impact per 10 min', 'player_name': 'Player'})
+                        title='Net Impact Rating per 10 Minutes (Top 10)',
+                        labels={'net_impact_per_10': 'Impact per 10 min', 'player_name': 'Player'},
+                        color='net_impact_per_10',
+                        color_continuous_scale='RdYlGn')
             st.plotly_chart(fig, use_container_width=True)
 
 # ============================================
@@ -382,15 +402,16 @@ elif page == "💾 Data Export":
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("📥 Download Games Data"):
+        if st.button("📥 Download Games Data", use_container_width=True):
             if not games_df.empty:
                 csv = games_df.to_csv(index=False)
-                st.download_button("Download CSV", csv, "games.csv", "text/csv")
+                st.download_button("⬇️ Download CSV", csv, "games.csv", "text/csv",
+                                 use_container_width=True)
             else:
                 st.warning("No games data to export")
     
     with col2:
-        if st.button("📥 Download All Possessions"):
+        if st.button("📥 Download All Possessions", use_container_width=True):
             all_poss = []
             for _, game in games_df.iterrows():
                 poss = get_possessions(game['game_id'])
@@ -399,12 +420,13 @@ elif page == "💾 Data Export":
             if all_poss:
                 possessions_df = pd.concat(all_poss)
                 csv = possessions_df.to_csv(index=False)
-                st.download_button("Download CSV", csv, "possessions.csv", "text/csv")
+                st.download_button("⬇️ Download CSV", csv, "possessions.csv", "text/csv",
+                                 use_container_width=True)
             else:
                 st.warning("No possessions data to export")
     
     with col3:
-        if st.button("📥 Download Player Stats"):
+        if st.button("📥 Download Player Stats", use_container_width=True):
             all_stats = []
             for _, game in games_df.iterrows():
                 stats = get_player_stats(game['game_id'])
@@ -413,13 +435,14 @@ elif page == "💾 Data Export":
             if all_stats:
                 stats_df = pd.concat(all_stats)
                 csv = stats_df.to_csv(index=False)
-                st.download_button("Download CSV", csv, "player_stats.csv", "text/csv")
+                st.download_button("⬇️ Download CSV", csv, "player_stats.csv", "text/csv",
+                                 use_container_width=True)
             else:
                 st.warning("No player stats to export")
     
     st.divider()
     
-    st.subheader("Current Data Summary")
+    st.subheader("📊 Current Data Summary")
     col1, col2, col3 = st.columns(3)
     col1.metric("Games Recorded", len(games_df))
     
