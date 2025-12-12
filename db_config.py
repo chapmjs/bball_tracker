@@ -149,4 +149,10 @@ def show_connection_status():
                 st.write(f"**Host:** {info['host']}")
                 st.write(f"**Port:** {info['port']}")
                 st.write(f"**Database:** {info['database']}")
-                st.write(f"**User:** {info['user'
+                st.write(f"**User:** {info['user']}")
+
+# Optional: Reset connection cache (useful for debugging)
+def reset_connection():
+    """Reset the cached database connection"""
+    st.cache_resource.clear()
+    st.rerun()
