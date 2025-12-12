@@ -207,3 +207,83 @@ def get_player_stats(game_id):
         SELECT pgs.*, p.player_name, p.jersey_number
         FROM player_game_stats pgs
         JOIN players p ON pgs.player_id = p.player_id
+        WHERE pgs.game_id = :game_id
+    """
+    return query_db(query, params={'game_id': game_id}, ttl=60)
+
+# ============================================
+# ANALYTICS QUERIES
+# ============================================
+
+def get_constraint_analysis(game_id):
+    """Analyze where possessions are breaking down"""
+    query = """
+        SELECT failure_type, COUNT(*) as count
+        FROM possessions
+        WHERE game_id = :game_id AND outcome = 'FAILED' AND failure_type IS NOT NULL
+        GROUP BY failure_type
+        ORDER BY count DESC
+    """
+    return query_db(query, params={'game_id': game_id}, ttl=60)
+
+def get_lineup_performance(game_id=None):
+    """Get lineup performance statistics"""
+    if game_id:
+        query = """
+            SELECT 
+                lineup,
+                COUNT(*) as possessions,
+                SUM(CASE WHEN outcome = 'SCORE' THEN 1 ELSE 0 END) as scores,
+                SUM(points_scored) as total_points
+            FROM detailed_possessions
+            WHERE game_id = :game_id
+            GROUP BY lineup ORDER BY total_points DESC
+        """
+        return query_db(query, params={'game_id': game_id}, ttl=60)
+    else:
+        query = """
+            SELECT 
+                lineup,
+                COUNT(*) as possessions,
+                SUM(CASE WHEN outcome = 'SCORE' THEN 1 ELSE 0 END) as scores,
+                SUM(points_scored) as total_points
+            FROM detailed_possessions
+            GROUP BY lineup ORDER BY total_points DESC
+        """
+        return query_db(query, ttl=300)
+
+def get_player_shooting_stats(game_id=None):
+    """Get shooting statistics by player"""
+    if game_id:
+        query = """
+            SELECT 
+                p.player_name,
+                p.jersey_number,
+                s.shot_type,
+                s.shot_quality,
+                COUNT(*) as attempts,
+                SUM(CASE WHEN s.made THEN 1 ELSE 0 END) as makes,
+                ROUND(SUM(CASE WHEN s.made THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as fg_pct
+            FROM shots s
+            JOIN players p ON s.player_id = p.player_id
+            WHERE s.game_id = :game_id
+            GROUP BY p.player_id, s.shot_type, s.shot_quality 
+            ORDER BY p.player_name, s.shot_type
+        """
+        return query_db(query, params={'game_id': game_id}, ttl=60)
+    else:
+        query = """
+            SELECT 
+                p.player_name,
+                p.jersey_number,
+                s.shot_type,
+                s.shot_quality,
+                COUNT(*) as attempts,
+                SUM(CASE WHEN s.made THEN 1 ELSE 0 END) as makes,
+                ROUND(SUM(CASE WHEN s.made THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as fg_pct
+            FROM shots s
+            JOIN players p ON s.player_id = p.player_id
+            GROUP BY p.player_id, s.shot_type, s.shot_quality 
+            ORDER BY p.player_name, s.shot_type
+        """
+        return query_db(query, ttl=300)
